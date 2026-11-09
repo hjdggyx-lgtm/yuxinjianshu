@@ -2,3 +2,9 @@ __pycache__/
 *.pyc
 收件箱/
 .codeartsdoer/
+build/
+dist/
+remote-touchpad-master/
+shoujishuru.spec
+消息记录.json
+_go_out.txt
