@@ -53,6 +53,8 @@ if os.name == "nt":
         _fields_ = [("type", wintypes.DWORD), ("union", _INPUTUNION)]
 
     INPUT_MOUSE = 0
+    INPUT_KEYBOARD = 1
+    KEYEVENTF_KEYUP = 0x0002
     VK_LBUTTON = 0x01
     VK_RBUTTON = 0x02
     KEYSTATE_PRESSED = 0x8000
@@ -200,42 +202,6 @@ if os.name == "nt":
             if initialized:
                 ole32.CoUninitialize()
 
-    # Win 短点打开开始菜单：Win11 不认合成的 Win 键（实测 22H2 前台无变化），
-    # WM_SYSCOMMAND SC_TASKLIST、UIA InvokePattern 也都无效；
-    # 有效方案 = UIA 拿任务栏开始按钮坐标（PowerShell，约 4 秒）+ 鼠标注入真实点击
-    # （复用触控板已验证通道）。坐标缓存后毫秒级；点击后检测菜单弹出，失败自动刷新坐标重试。
-    winStartBtnPos = [None]
-
-
-    def uiastartButtonPos():
-        ps = '''
-Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
-$root = [System.Windows.Automation.AutomationElement]::RootElement
-$trayCond = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ClassNameProperty, 'Shell_TrayWnd')
-$tray = $root.FindFirst([System.Windows.Automation.TreeScope]::Children, $trayCond)
-if ($tray) {
-  $btnCond = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty, '开始')
-  $btn = $tray.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $btnCond)
-  if ($btn) {
-    $pt = $btn.GetClickablePoint()
-    Write-Output ('POINT:' + $pt.X.ToString() + ',' + $pt.Y.ToString())
-  }
-}
-'''
-        enc = base64.b64encode(ps.encode("utf-16-le")).decode()
-        try:
-            r = subprocess.run(
-                ["powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden",
-                 "-EncodedCommand", enc],
-                capture_output=True, timeout=15, creationflags=0x08000000)
-            out = r.stdout.decode("gbk", "ignore").strip()
-            if out.startswith("POINT:"):
-                x, y = out[6:].split(",")
-                return int(float(x)), int(float(y))
-        except Exception as exc:
-            print("UIA 找开始按钮失败：%r" % exc, flush=True)
-        return None
-
     def startMenuShown():
         buf = ctypes.create_unicode_buffer(128)
         user32.GetClassNameW(user32.GetForegroundWindow(), buf, 128)
@@ -249,104 +215,61 @@ if ($tray) {
             time.sleep(0.3)
         return False
 
-    def startMenuViaPs():
-        # PowerShell 代点：微软签名进程的鼠标操作不被行为引擎拦（python 进程点
-        # 任务栏区域=高危动作会被专项拦截，实测 PS 代点可弹出开始菜单），约 2 秒
-        pos = winStartBtnPos[0]
-        if not pos:
-            pos = uiastartButtonPos()
-            if not pos:
-                return False
-            winStartBtnPos[0] = pos
-        ps = '''
-Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-public class KBStart {
-    [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
-    [DllImport("user32.dll")] public static extern void mouse_event(uint f, int dx, int dy, uint d, UIntPtr e);
-    [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINTS p);
-    public struct POINTS { public int X; public int Y; }
-}
-'@
-$save = New-Object KBStart+POINTS
-[KBStart]::GetCursorPos([ref]$save) | Out-Null
-[KBStart]::SetCursorPos(%d, %d) | Out-Null
-Start-Sleep -Milliseconds 60
-[KBStart]::mouse_event(2, 0, 0, 0, [UIntPtr]::Zero)
-Start-Sleep -Milliseconds 40
-[KBStart]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero)
-Start-Sleep -Milliseconds 60
-[KBStart]::SetCursorPos($save.X, $save.Y) | Out-Null
-Write-Output 'CLICKED'
-''' % pos
-        enc = base64.b64encode(ps.encode("utf-16-le")).decode()
-        try:
-            r = subprocess.run(
-                ["powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden",
-                 "-EncodedCommand", enc],
-                capture_output=True, timeout=15, creationflags=0x08000000)
-            out = r.stdout.decode("gbk", "ignore")
-            if "CLICKED" in out:
-                # CLICKED 只代表 PS 动作执行完，不代表点击送达（注入被吞时是空执行）
-                if startMenuShownSoon():
-                    return True
-                print("PowerShell 代点执行了但开始菜单未弹出（点击可能被吞）", flush=True)
-                return False
-            print("PowerShell 代点开始按钮无结果：%r" % out, flush=True)
-        except Exception as exc:
-            print("PowerShell 代点开始按钮失败：%r" % exc, flush=True)
-        return False
+    # Win 短点打开开始菜单（remote-touchpad 同款通路）：ctypes SendInput 直发合成
+    # Win 键（VK_LWIN down→up），全程无 shell 子进程——360 对 powershell.exe 报
+    # Trojan.Generic 拦截，UIA 定位/代点路线废弃；exe 加入信任区后毫秒级弹出
+    # （Go 版同款 SendInput 在被信任进程实测有效）。失败备选 pyautogui.press。
 
-    def pressWinKeyViaKeybd():
-        # 合成 Win 键按下+抬起（keybd_event 无返回值，送达与否看开始菜单是否弹出）。
-        # 实测：Go 版同款 SendInput(VK_LWIN down+up) 在被信任进程里能弹开始菜单——
-        # Windows 认合成 Win 键；360 只对"未信任进程"的 Win 键注入专项吞（最高敏感度）
-        user32.keybd_event(0x5B, 0, 0, 0)
+    def sendKeySequence(keys):
+        # ctypes SendInput 直发键序列：down→(真实节奏)→up 分批提交，
+        # 返回 True=全部事件送达；False=通道被拦（调用方走 pyautogui 备选）
+        VK = {
+            "winleft": 0x5B, "winright": 0x5C, "ctrl": 0x11, "shift": 0x10,
+            "alt": 0x12, "enter": 0x0D, "esc": 0x1B, "tab": 0x09,
+            "space": 0x20, "backspace": 0x08, "delete": 0x2E,
+            "up": 0x26, "down": 0x28, "left": 0x25, "right": 0x27,
+            "home": 0x24, "end": 0x23, "pageup": 0x21, "pagedown": 0x22,
+            "insert": 0x2D,
+        }
+        vks = []
+        for k in keys:
+            vk = VK.get(k)
+            if vk is None:
+                if len(k) == 1:
+                    vk = ord(k.upper())
+                else:
+                    return False
+            vks.append(vk)
+        for vk in vks:
+            e = _INPUT()
+            e.type = INPUT_KEYBOARD
+            e.union.ki = _KEYBDINPUT(vk, 0, 0, 0, None)
+            if user32.SendInput(1, ctypes.byref(e), ctypes.sizeof(_INPUT)) != 1:
+                return False
         time.sleep(0.05)
-        user32.keybd_event(0x5B, 0, 0x0002, 0)
+        for vk in reversed(vks):
+            e = _INPUT()
+            e.type = INPUT_KEYBOARD
+            e.union.ki = _KEYBDINPUT(vk, 0, KEYEVENTF_KEYUP, 0, None)
+            if user32.SendInput(1, ctypes.byref(e), ctypes.sizeof(_INPUT)) != 1:
+                return False
+        return True
 
     def openStartMenu():
-        # ①注入合成 Win 键：exe 加入 360 信任区后毫秒级、不碰鼠标（标准方式）；
-        # 未放行时 Win 键注入被专项吞，靠弹出检测失败转兜底
-        pressWinKeyViaKeybd()
-        if startMenuShownSoon():
-            return True
-        # ②UIA 拿开始按钮坐标 + python 鼠标点击（360"允许运行"状态下实测有效）
-        pos = winStartBtnPos[0]
-        if not pos:
-            pos = uiastartButtonPos()  # 锁外跑 PowerShell，不阻塞触控板请求
-            if not pos:
-                return False
-            winStartBtnPos[0] = pos
-        clickError = None
-        with mouseLock:
-            pt = wintypes.POINT()
-            user32.GetCursorPos(ctypes.byref(pt))
-            orig = (pt.x, pt.y)
-            try:
-                user32.SetCursorPos(pos[0], pos[1])
-                time.sleep(0.05)
-                try:
-                    sendMouseEventPair(MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP)
-                except Exception:
-                    # 抬起被拦会系统级卡键：强制补发抬起并确认弹起
-                    for _ in range(3):
-                        user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
-                        time.sleep(0.08)
-                        if not (user32.GetAsyncKeyState(0x01) & 0x8000):
-                            break
-                    raise
-            except Exception as exc:
-                clickError = exc  # 注入被拦不直接报错，转 PowerShell 代点兜底
-            finally:
-                user32.SetCursorPos(orig[0], orig[1])
-        if clickError is None and startMenuShownSoon():
-            return True
-        if clickError is not None:
-            print("开始菜单：python 注入被拦（%r），转 PowerShell 代点" % clickError, flush=True)
-        # ③PowerShell 代点（微软签名进程的鼠标操作不被行为引擎拦，约 2.5 秒）
-        return startMenuViaPs()
+        # ①ctypes SendInput 直发 Win 键（exe 加入信任区后毫秒级，Go 版同款实测有效）
+        if sendKeySequence(["winleft"]):
+            if startMenuShownSoon():
+                return True
+            print("键盘：Win 键已送达但开始菜单未弹出", flush=True)
+        else:
+            print("键盘：SendInput Win 键被拦，转 pyautogui 备选", flush=True)
+        # ②pyautogui 备选（keybd_event 通道）
+        try:
+            pyautogui.press("winleft")
+            return startMenuShownSoon()
+        except Exception as exc:
+            print("pyautogui Win 键失败：%r" % exc, flush=True)
+            return False
 else:
     user32 = None
     sendMouseEvent = None
@@ -1384,6 +1307,8 @@ button:disabled {
     <button id="inboxOpenBtn" class="panelNav"><span>查看收件箱</span><span>›</span></button>
 
     <button id="fullscreenBtn" class="panelNav"><span>全屏模式</span><span>›</span></button>
+    <label class="panelToggle"><span>界面音效</span><input type="checkbox" id="uiSoundToggle"></label>
+    <label class="panelToggle"><span>界面震动</span><input type="checkbox" id="uiVibeToggle"></label>
     <div class="panelNote">更多功能开发中…</div>
   </div>
 </div>
@@ -1424,13 +1349,13 @@ button:disabled {
     <div id="kbPages">
       <div class="kbPage">
         <div class="kbRow">
-          <div class="kbKey" data-key=";">;</div>
-          <div class="kbKey" data-key="'">'</div>
-          <div class="kbKey" data-key=",">,</div>
-          <div class="kbKey" data-key=".">.</div>
-          <div class="kbKey" data-key="/">/</div>
+          <div class="kbKey" data-key=";" data-shift=":">;</div>
+          <div class="kbKey" data-key="'" data-shift="&quot;">'</div>
+          <div class="kbKey" data-key="," data-shift="&lt;">,</div>
+          <div class="kbKey" data-key="." data-shift="&gt;">.</div>
+          <div class="kbKey" data-key="/" data-shift="?">/</div>
           <div class="kbKey" data-key="?">?</div>
-          <div class="kbKey" data-key="-">-</div>
+          <div class="kbKey" data-key="-" data-shift="_">-</div>
           <div class="kbKey" data-key="_">_</div>
           <div class="kbKey" data-key="(">(</div>
           <div class="kbKey" data-key=")">)</div>
@@ -1448,37 +1373,37 @@ button:disabled {
           <div class="kbKey" data-key="0">0</div>
         </div>
         <div class="kbRow">
-          <div class="kbKey" data-key="q">q</div>
-          <div class="kbKey" data-key="w">w</div>
-          <div class="kbKey" data-key="e">e</div>
-          <div class="kbKey" data-key="r">r</div>
-          <div class="kbKey" data-key="t">t</div>
-          <div class="kbKey" data-key="y">y</div>
-          <div class="kbKey" data-key="u">u</div>
-          <div class="kbKey" data-key="i">i</div>
-          <div class="kbKey" data-key="o">o</div>
-          <div class="kbKey" data-key="p">p</div>
+          <div class="kbKey" data-key="q" data-shift="Q">q</div>
+          <div class="kbKey" data-key="w" data-shift="W">w</div>
+          <div class="kbKey" data-key="e" data-shift="E">e</div>
+          <div class="kbKey" data-key="r" data-shift="R">r</div>
+          <div class="kbKey" data-key="t" data-shift="T">t</div>
+          <div class="kbKey" data-key="y" data-shift="Y">y</div>
+          <div class="kbKey" data-key="u" data-shift="U">u</div>
+          <div class="kbKey" data-key="i" data-shift="I">i</div>
+          <div class="kbKey" data-key="o" data-shift="O">o</div>
+          <div class="kbKey" data-key="p" data-shift="P">p</div>
         </div>
         <div class="kbRow">
-          <div class="kbKey" data-key="a">a</div>
-          <div class="kbKey" data-key="s">s</div>
-          <div class="kbKey" data-key="d">d</div>
-          <div class="kbKey" data-key="f">f</div>
-          <div class="kbKey" data-key="g">g</div>
-          <div class="kbKey" data-key="h">h</div>
-          <div class="kbKey" data-key="j">j</div>
-          <div class="kbKey" data-key="k">k</div>
-          <div class="kbKey" data-key="l">l</div>
+          <div class="kbKey" data-key="a" data-shift="A">a</div>
+          <div class="kbKey" data-key="s" data-shift="S">s</div>
+          <div class="kbKey" data-key="d" data-shift="D">d</div>
+          <div class="kbKey" data-key="f" data-shift="F">f</div>
+          <div class="kbKey" data-key="g" data-shift="G">g</div>
+          <div class="kbKey" data-key="h" data-shift="H">h</div>
+          <div class="kbKey" data-key="j" data-shift="J">j</div>
+          <div class="kbKey" data-key="k" data-shift="K">k</div>
+          <div class="kbKey" data-key="l" data-shift="L">l</div>
           <div class="kbKey small" data-key="backspace">退格</div>
         </div>
         <div class="kbRow">
-          <div class="kbKey" data-key="z">z</div>
-          <div class="kbKey" data-key="x">x</div>
-          <div class="kbKey" data-key="c">c</div>
-          <div class="kbKey" data-key="v">v</div>
-          <div class="kbKey" data-key="b">b</div>
-          <div class="kbKey" data-key="n">n</div>
-          <div class="kbKey" data-key="m">m</div>
+          <div class="kbKey" data-key="z" data-shift="Z">z</div>
+          <div class="kbKey" data-key="x" data-shift="X">x</div>
+          <div class="kbKey" data-key="c" data-shift="C">c</div>
+          <div class="kbKey" data-key="v" data-shift="V">v</div>
+          <div class="kbKey" data-key="b" data-shift="B">b</div>
+          <div class="kbKey" data-key="n" data-shift="N">n</div>
+          <div class="kbKey" data-key="m" data-shift="M">m</div>
           <div class="kbKey wide" data-key="space">空格</div>
           <div class="kbKey small" data-key="enter">回车</div>
         </div>
@@ -1525,8 +1450,8 @@ button:disabled {
           <div class="kbKey" data-key="^">^</div>
           <div class="kbKey" data-key="&amp;">&amp;</div>
           <div class="kbKey" data-key="*">*</div>
-          <div class="kbKey" data-key="[">[</div>
-          <div class="kbKey" data-key="]">]</div>
+          <div class="kbKey" data-key="[" data-shift="{">[</div>
+          <div class="kbKey" data-key="]" data-shift="}">]</div>
         </div>
         <div class="kbRow">
           <div class="kbKey" data-key="=">=</div>
@@ -1548,6 +1473,7 @@ button:disabled {
     <div class="kbSetHead"><button id="kbSetBack">‹ 返回</button><span>键盘设置</span></div>
     <label class="kbSetItem"><input type="checkbox" id="kbRepeatToggle"><span>长按按键连发</span></label>
     <label class="kbSetItem"><input type="checkbox" id="kbVibrateToggle"><span>按键震动反馈</span></label>
+    <label class="kbSetItem"><input type="checkbox" id="kbSoundToggle"><span>按键音效</span></label>
     <label class="kbSetItem"><input type="checkbox" id="kbStickyToggle"><span>组合键后修饰键保持</span></label>
   </div>
 </div>
@@ -1658,7 +1584,7 @@ function closeAttachSheet() {
 }
 
 attachBtn.addEventListener("click", openAttachSheet);
-attachSheetMask.addEventListener("click", closeAttachSheet);
+attachSheetMask.addEventListener("click", function () { uiClick(); uiVibe(); closeAttachSheet(); });
 document.getElementById("sheetCancel").addEventListener("click", closeAttachSheet);
 document.getElementById("cameraItem").addEventListener("click", function () {
   closeAttachSheet();
@@ -1976,10 +1902,14 @@ function stopArrowRepeat() {
 // ▲=滚轮向前推=内容上移（对齐真鼠标方向）；▲曾传 -1 导致内容下移，与鼠标相反
 scrollUp.addEventListener("touchstart", function (e) {
   e.preventDefault();
+  uiClick();
+  uiVibe();
   startArrowRepeat(1);
 }, { passive: false });
 scrollDown.addEventListener("touchstart", function (e) {
   e.preventDefault();
+  uiClick();
+  uiVibe();
   startArrowRepeat(-1);
 }, { passive: false });
 scrollUp.addEventListener("touchend", stopArrowRepeat);
@@ -1989,12 +1919,16 @@ scrollDown.addEventListener("touchcancel", stopArrowRepeat);
 
 btnLeft.addEventListener("touchstart", function (e) {
   e.preventDefault();
+  uiClick();
+  uiVibe();
   sendMouse({ click: true });
   hintFlash("左键");
 }, { passive: false });
 
 btnRight.addEventListener("touchstart", function (e) {
   e.preventDefault();
+  uiClick();
+  uiVibe();
   sendMouse({ rightClick: true });
   hintFlash("右键");
 }, { passive: false });
@@ -2008,6 +1942,7 @@ function updateStatus(text, cls) {
   }
   statusEl.textContent = text;
   statusEl.className = cls || "";
+  if (text && (cls === "err" || cls === "ok")) uiResult(cls === "ok");
   if (text && (cls === "err" || cls === "ok")) {
     statusTimer = setTimeout(function () {
       statusEl.textContent = "";
@@ -2032,7 +1967,20 @@ function getPcLastRead() {
   }
 }
 
+document.querySelector(".sideToggle").addEventListener("click", function () {
+  uiClick();
+  uiVibe();
+});
+
+var pcBellSeenId = null;
+
 function updatePcBell(latestId) {
+  // 新消息到达（计数增长）：叮一声 + 震动提示（页面首次加载静默，历史消息不响）
+  if (pcBellSeenId !== null && latestId > pcBellSeenId) {
+    uiDing();
+    uiVibe();
+  }
+  pcBellSeenId = latestId;
   pcBell.classList.toggle("hasUnread", latestId > getPcLastRead());
 }
 
@@ -2108,6 +2056,20 @@ function togglePcInbox() {
 
 pcBell.addEventListener("click", togglePcInbox);
 
+// 消息气泡"点外面即收起"：除铃铛（toggle 专用）/气泡本体（看消息与复制）/鼠标控制区
+// （滑动不打扰气泡显示）外，任意触摸即收起，恢复输入框首行缩进——同键盘面板的场外收起交互
+document.addEventListener("touchstart", function (e) {
+  if (!pcInbox.classList.contains("open")) return;
+  var el = e.target;
+  while (el) {
+    if (el === pcInbox || el === pcBell || el.id === "mousePad") return;
+    el = el.parentElement;
+  }
+  togglePcInbox();
+  uiClick();
+  uiVibe();
+}, { passive: true });
+
 function checkConnection() {
   var ctrl = new AbortController();
   var timer = setTimeout(function () { ctrl.abort(); }, 3000);
@@ -2152,6 +2114,7 @@ function sendText() {
         updateStatus(data.message, "ok");
       } else {
         updateStatus("", "");
+        uiResult(true);
       }
       inputBox.focus();
     } else {
@@ -2269,7 +2232,7 @@ imgViewer.addEventListener("click", function (e) {
 
 menuBtn.addEventListener("click", openPanel);
 document.getElementById("panelClose").addEventListener("click", closePanel);
-panelMask.addEventListener("click", closePanel);
+panelMask.addEventListener("click", function () { uiClick(); uiVibe(); closePanel(); });
 document.getElementById("inboxOpenBtn").addEventListener("click", openInbox);
 document.getElementById("inboxClose").addEventListener("click", closeInbox);
 
@@ -2334,6 +2297,7 @@ function sendToDesktop() {
           localStorage.setItem("pcLastRead", String(data.id));
         }
       } catch (err) {}
+      uiResult(true);
       updateStatus("", "");
     } else {
       updateStatus(data.message, "err");
@@ -2379,9 +2343,104 @@ function kbVibrateOn() {
 function kbStickyOn() {
   try { return localStorage.getItem("kbSticky") === "1"; } catch (err) { return false; }
 }
-function kbBuzz() {
-  if (kbVibrateOn() && navigator.vibrate) navigator.vibrate(12);
+function kbSoundOn() {
+  try { return localStorage.getItem("kbSound") !== "0"; } catch (err) { return true; }
 }
+
+var kbAudioCtx = null;
+
+function kbAudioInit() {
+  if (!kbAudioCtx) {
+    try {
+      var AC = window.AudioContext || window.webkitAudioContext;
+      if (AC) kbAudioCtx = new AC();
+    } catch (err) {}
+  }
+  if (kbAudioCtx && kbAudioCtx.state === "suspended") kbAudioCtx.resume();
+}
+
+function kbTick() {
+  // Web Audio 合成按键音：AudioContext 首次手势激活后任意时刻可播，
+  // 不受 navigator.vibrate 的手势栈限制（长按/连发场景震动会被浏览器静默拒）。
+  // suspended 状态也尝试播放（resume 已在 init 触发，部分浏览器排队生效）
+  if (!kbSoundOn()) return;
+  kbAudioInit();
+  if (!kbAudioCtx) return;
+  try {
+    var t = kbAudioCtx.currentTime;
+    var osc = kbAudioCtx.createOscillator();
+    var g = kbAudioCtx.createGain();
+    osc.type = "square";
+    osc.frequency.value = 1200;
+    g.gain.setValueAtTime(0.4, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.035);
+    osc.connect(g);
+    g.connect(kbAudioCtx.destination);
+    osc.start(t);
+    osc.stop(t + 0.04);
+  } catch (err) {}
+}
+
+function kbBuzz() {
+  kbTick();
+  if (kbVibrateOn() && navigator.vibrate) navigator.vibrate([50, 30, 50]);
+}
+
+function uiSoundOn() {
+  try { return localStorage.getItem("uiSound") !== "0"; } catch (err) { return true; }
+}
+function uiVibeOn() {
+  try { return localStorage.getItem("uiVibe") !== "0"; } catch (err) { return true; }
+}
+function uiTone(freq, dur, vol, when) {
+  kbAudioInit();
+  if (!kbAudioCtx) return;
+  try {
+    var t = kbAudioCtx.currentTime + (when || 0);
+    var osc = kbAudioCtx.createOscillator();
+    var g = kbAudioCtx.createGain();
+    osc.type = "square";
+    osc.frequency.value = freq;
+    g.gain.setValueAtTime(vol, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+    osc.connect(g);
+    g.connect(kbAudioCtx.destination);
+    osc.start(t);
+    osc.stop(t + dur + 0.01);
+  } catch (err) {}
+}
+function uiClick() {
+  if (!uiSoundOn()) return;
+  uiTone(1200, 0.04, 0.4, 0);
+}
+function uiVibe() {
+  if (!uiVibeOn()) return;
+  if (navigator.vibrate) navigator.vibrate([50, 30, 50]);
+}
+function uiResult(okFlag) {
+  if (!uiSoundOn()) return;
+  if (okFlag) {
+    uiTone(1318, 0.08, 0.35, 0);
+    uiTone(1760, 0.12, 0.35, 0.09);
+  } else {
+    uiTone(420, 0.2, 0.4, 0);
+  }
+}
+function uiDing() {
+  if (!uiSoundOn()) return;
+  uiTone(1318, 0.09, 0.35, 0);
+  uiTone(1760, 0.15, 0.3, 0.1);
+}
+// 全局按钮点击确认：声音 tick + 震动双脉冲（委托，主界面/面板/附件面板按钮全覆盖）
+document.addEventListener("click", function (e) {
+  var el = e.target;
+  while (el && el !== document.body && el.tagName !== "BUTTON") el = el.parentElement;
+  if (el && el.tagName === "BUTTON") {
+    uiClick();
+    uiVibe();
+  }
+});
+
 
 function kbSendKeys(keys) {
   kbChain = kbChain.then(function () {
@@ -2400,6 +2459,17 @@ function kbRenderMods() {
   for (var i = 0; i < btns.length; i++) {
     btns[i].classList.toggle("on", !!kbMods[btns[i].getAttribute("data-mod")]);
   }
+  kbSyncShift();
+}
+
+function kbSyncShift() {
+  // Shift 锁定时键帽切换为上档字符（字母大写/Shift+标点），取消后恢复
+  var keys = kbPanel.querySelectorAll("[data-shift]");
+  var on = !!kbMods.shift;
+  for (var i = 0; i < keys.length; i++) {
+    var el = keys[i];
+    el.textContent = on ? el.getAttribute("data-shift") : el.getAttribute("data-key");
+  }
 }
 
 function kbClearMods() {
@@ -2415,7 +2485,8 @@ function kbTapKey(key) {
   if (kbMods.win) keys.push("winleft");
   if (kbMods.ctrl) keys.push("ctrl");
   if (kbMods.alt) keys.push("alt");
-  if (kbMods.shift) keys.push("shift");
+  // 数字键不参与上档：Shift 锁定时仍输出数字本身（符号统一在第 2 页直按）
+  if (kbMods.shift && !/^[0-9]$/.test(key)) keys.push("shift");
   keys.push(key);
   kbSendKeys(keys);
   if (keys.length > 1 && !kbStickyOn()) kbClearMods();
@@ -2449,6 +2520,7 @@ kbBtn.addEventListener("touchstart", function (e) {
 }, { passive: true });
 kbBtn.addEventListener("contextmenu", function (e) { e.preventDefault(); });
 kbBtn.addEventListener("click", function () {
+  kbAudioInit();
   kbClearMods();
   kbPanel.classList.remove("setting");
   kbGoPage(0);
@@ -2458,6 +2530,8 @@ kbBtn.addEventListener("click", function () {
 });
 kbMask.addEventListener("click", function () {
   kbStopRepeat();
+  uiClick();
+  uiVibe();
   kbMask.classList.remove("open");
   kbPanel.classList.remove("open");
 });
@@ -2476,7 +2550,10 @@ function bindKbToggle(id, storageKey, defaultChecked) {
 }
 bindKbToggle("kbRepeatToggle", "kbRepeat", true);
 bindKbToggle("kbVibrateToggle", "kbVibrate", true);
+bindKbToggle("kbSoundToggle", "kbSound", true);
 bindKbToggle("kbStickyToggle", "kbSticky", false);
+bindKbToggle("uiSoundToggle", "uiSound", true);
+bindKbToggle("uiVibeToggle", "uiVibe", true);
 
 document.getElementById("kbSetBack").addEventListener("click", function () {
   kbPanel.classList.remove("setting");
@@ -3002,25 +3079,17 @@ def keyPress():
         return jsonify(ok=True)
     # 合成 Win+D 系统同样不认（实测），改走 Shell COM 的 ToggleDesktop（Win+D 的底层实现，再调一次恢复）
     if norm == ["winleft", "d"]:
-        # COM 直调毫秒级（与任务管理器秒开对齐）；PowerShell 兜底（慢 2-4 秒但独立可靠）
+        # COM 直调毫秒级，进程内完成无 shell 子进程（powershell 兜底已废弃：
+        # 360 对 powershell.exe 报 Trojan.Generic 拦截）
         try:
             if toggleDesktopViaCom():
-                print("键盘：已切换显示桌面", flush=True)
+                print("键盘：已切换显示桌面（COM）", flush=True)
                 return jsonify(ok=True)
-            print("COM ToggleDesktop 失败，转 PowerShell 兜底", flush=True)
+            return jsonify(ok=False, message="显示桌面失败，请重试")
         except Exception as exc:
-            print("COM ToggleDesktop 异常 %r，转 PowerShell 兜底" % exc, flush=True)
-        try:
-            subprocess.Popen(
-                ["powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden",
-                 "-Command", "(New-Object -ComObject Shell.Application).ToggleDesktop()"],
-                creationflags=0x08000000)
-            print("键盘：已切换显示桌面（PowerShell 兜底）", flush=True)
-            return jsonify(ok=True)
-        except Exception as exc:
-            print("切换显示桌面失败：%r" % exc, flush=True)
-            return jsonify(ok=False, message="切换显示桌面失败：%s" % exc)
-    # Windows 不认合成的 Win 键（实测 22H2 开始菜单不弹），短点走"UIA 定位 + 鼠标点击开始按钮"
+            print("COM ToggleDesktop 异常 %r" % exc, flush=True)
+            return jsonify(ok=False, message="显示桌面失败：%s" % exc)
+    # Win 短点：ctypes SendInput 直发合成 Win 键（remote-touchpad 同款通路，无 shell 子进程）
     if norm == ["winleft"]:
         try:
             if openStartMenu():
