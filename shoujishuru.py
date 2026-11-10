@@ -376,6 +376,13 @@ pyautogui.FAILSAFE = False
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_MB * 1024 * 1024
 
+@app.after_request
+def addNoCacheHeaders(response):
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response
+
 pageHtml = """<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -393,28 +400,109 @@ body {
   flex-direction: column;
   padding: 12px 20px 24px;
 }
-.title {
-  font-size: 20px;
-  font-weight: 600;
-  text-align: center;
-  color: rgb(40, 70, 140);
-  margin: 0 0 8px;
-}
+
 .inputShell {
   position: relative;
   border: 1px solid rgb(185, 198, 225);
   border-radius: 12px;
   background: rgb(255, 255, 255);
   box-shadow: 0 2px 10px rgba(180, 195, 225, 0.35);
-  height: 38vh;
+  height: calc(36vh + 54px);
   display: flex;
   flex-direction: column;
+  overflow: visible;
 }
 .inputShell:focus-within { border-color: rgb(80, 130, 235); }
+.inputShell::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 39px;
+  height: 46px;
+  background: rgb(224, 238, 255);
+  border-bottom: 1px solid rgb(185, 198, 225);
+  border-radius: 0 11px 0 0;
+  pointer-events: none;
+  z-index: 1;
+}
+.inputShell::after {
+  content: "";
+  position: absolute;
+  top: 46px;
+  right: 0;
+  width: 39px;
+  bottom: 47px;
+  background: rgb(240, 244, 252);
+  pointer-events: none;
+  z-index: 0;
+}
+.sideToggle {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  width: 27px;
+  transform: translateY(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 6px 0;
+  z-index: 2;
+  background: rgb(224, 238, 255);
+  border: 1px solid rgb(110, 155, 235);
+  border-radius: 6px;
+}
+.sideToggle input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  flex-shrink: 0;
+  appearance: none;
+  -webkit-appearance: none;
+  background: rgb(224, 238, 255);
+  border: 1px solid rgb(110, 155, 235);
+  border-radius: 3px;
+  position: relative;
+  cursor: pointer;
+}
+.sideToggle input:checked {
+  background: rgb(64, 110, 255);
+  border-color: rgb(64, 110, 255);
+}
+.sideToggle input:checked::before {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 0px;
+  width: 5px;
+  height: 8px;
+  border: solid rgb(255, 255, 255);
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+.sideToggle span {
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+  font-size: 12px;
+  color: rgb(70, 85, 115);
+  line-height: 1;
+  letter-spacing: 1px;
+}
+.rightDivider {
+  position: absolute;
+  right: 39px;
+  top: 0;
+  bottom: 47px;
+  width: 1px;
+  background: rgb(185, 198, 225);
+  pointer-events: none;
+}
 #pcBell {
   position: absolute;
-  top: -11px;
-  right: 3px;
+  top: -7px;
+  left: 7px;
   width: 30px;
   height: 30px;
   padding: 0;
@@ -453,7 +541,7 @@ body {
 #pcInbox {
   display: none;
   flex-direction: column;
-  margin: 6px 8px 0;
+  margin: 6px 46px 1px 7px;
   padding: 2px 10px;
   max-height: 120px;
   overflow-y: auto;
@@ -461,13 +549,25 @@ body {
   border: 1px solid rgb(185, 198, 225);
   border-radius: 12px;
   flex-shrink: 0;
+  transform: translateY(1px);
 }
 #pcInbox.open {
   display: flex;
 }
+#pcInbox::-webkit-scrollbar {
+  width: 6px;
+}
+#pcInbox::-webkit-scrollbar-track {
+  background: transparent;
+  margin: 6px 0;
+}
+#pcInbox::-webkit-scrollbar-thumb {
+  background: rgb(185, 198, 225);
+  border-radius: 3px;
+}
 .pcChip {
   -webkit-tap-highlight-color: transparent;
-  padding: 7px 0;
+  padding: 2px 0;
   border-bottom: 1px solid rgb(185, 198, 225);
   font-size: 14px;
   line-height: 1.4;
@@ -485,11 +585,12 @@ body {
 .pcChipTime {
   font-size: 12px;
   color: rgb(140, 150, 175);
-  margin-bottom: 2px;
+  margin-bottom: 0;
+  text-align: right;
 }
 textarea {
-  width: 100%;
   flex: 1;
+  min-width: 0;
   min-height: 0;
   resize: none;
   background: transparent;
@@ -498,10 +599,12 @@ textarea {
   color: rgb(40, 50, 70);
   font-size: 17px;
   line-height: 1.5;
-  padding: 12px 14px;
+  padding: 9px 14px 12px;
+  text-indent: 26px;
   outline: none;
   -webkit-appearance: none;
   appearance: none;
+  margin-right: 39px;
 }
 button {
   -webkit-tap-highlight-color: transparent;
@@ -523,18 +626,22 @@ button:disabled {
 }
 .sendRow {
   display: flex;
-  gap: 8px;
-  margin-top: 8px;
+  padding: 0;
+  border-top: 1px solid rgb(185, 198, 225);
+  flex-shrink: 0;
 }
 #sendBtn, #pcSendBtn {
   flex: 1;
   margin-top: 0;
   height: 46px;
-  padding: 0;
+  padding: 10px 0 0;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: center;
   position: relative;
+  border: none;
+  border-right: 1px solid rgb(185, 198, 225);
+  border-radius: 0;
 }
 .btnSub {
   position: absolute;
@@ -548,7 +655,7 @@ button:disabled {
   pointer-events: none;
 }
 #attachBtn {
-  width: 40px;
+  width: 39px;
   margin-top: 0;
   height: 46px;
   padding: 0;
@@ -558,7 +665,11 @@ button:disabled {
   font-size: 24px;
   font-weight: 400;
   line-height: 1;
+  border: none;
+  border-radius: 0;
 }
+#pcSendBtn { border-radius: 0 0 0 11px; }
+#attachBtn { border-radius: 0 0 11px 0; }
 #attachBar {
   display: none;
   flex-wrap: wrap;
@@ -567,6 +678,7 @@ button:disabled {
   max-height: 96px;
   overflow-y: auto;
   flex-shrink: 0;
+  margin-right: 39px;
 }
 .fileChip {
   position: relative;
@@ -663,8 +775,9 @@ button:disabled {
 }
 .sheetCancel:active { background: rgba(120, 160, 235, 0.12); }
 #mousePad {
-  margin-top: 8px;
-  height: 40vh;
+  margin-top: 4px;
+
+  height: calc(36vh + 54px);
   background: rgb(255, 255, 255);
   border: 1px solid rgb(185, 198, 225);
   border-radius: 12px;
@@ -792,36 +905,31 @@ button:disabled {
 }
 .mouseBtn:active { background: rgb(198, 221, 255); }
 #btnLeft { border-right: 1px solid rgb(185, 198, 225); border-radius: 0 0 0 11px; }
-#connDot {
-  position: fixed;
-  top: 14px;
-  right: 14px;
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  background: rgb(170, 178, 190);
-}
-#connDot.ok { background: rgb(52, 199, 89); }
-#connDot.err { background: rgb(255, 69, 58); }
+
 #status {
-  margin-top: 8px;
+  position: absolute;
+  bottom: 47px;
+  left: 0;
+  right: 0;
   text-align: center;
   font-size: 13px;
   color: rgb(135, 148, 172);
+  pointer-events: none;
+  z-index: 5;
 }
 #status.ok { color: rgb(35, 150, 95); }
 #status.err { color: rgb(205, 75, 75); }
 #status:empty { display: none; }
 #menuBtn {
-  position: fixed;
-  top: 4px;
-  left: 6px;
-  width: 40px;
-  height: 40px;
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 39px;
+  height: 46px;
   margin-top: 0;
   padding: 0;
   border: none;
-  border-radius: 10px;
+  border-radius: 0 11px 0 0;
   background: transparent;
   display: flex;
   flex-direction: column;
@@ -837,6 +945,8 @@ button:disabled {
   border-radius: 2px;
   background: rgb(40, 70, 140);
 }
+#menuBtn.ok .bar { background: rgb(52, 199, 89); }
+#menuBtn.err .bar { background: rgb(255, 69, 58); }
 #panelMask {
   position: fixed;
   top: 0;
@@ -851,26 +961,32 @@ button:disabled {
 }
 #panelMask.open { opacity: 1; visibility: visible; }
 #panel {
-  position: fixed;
+  position: absolute;
   top: 0;
-  left: 0;
-  bottom: 0;
+  right: 40px;
+  bottom: 47px;
   width: 33.33vw;
   min-width: 132px;
-  background: rgb(255, 255, 255);
-  border-right: 1px solid rgb(185, 198, 225);
-  box-shadow: 4px 0 16px rgba(120, 140, 180, 0.25);
-  transform: translateX(-105%);
-  transition: transform 0.25s ease;
+  background: rgb(240, 244, 252);
+  border-left: 1px solid rgb(185, 198, 225);
+  border-bottom: 1px solid rgb(185, 198, 225);
+  box-shadow: -4px 0 16px rgba(120, 140, 180, 0.25);
+  clip-path: inset(0 0 0 100%);
+  transition: clip-path 0.25s ease, visibility 0s linear 0.25s;
+  visibility: hidden;
   z-index: 50;
   padding: 14px 12px;
 }
-#panel.open { transform: translateX(0); }
+#panel.open {
+  clip-path: inset(0 0 0 0);
+  visibility: visible;
+  transition: clip-path 0.25s ease, visibility 0s linear 0s;
+}
 .panelHead {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 10px;
+  margin-bottom: 6px;
 }
 .panelTitle {
   font-size: 16px;
@@ -1195,35 +1311,20 @@ button:disabled {
     height: 100svh;
     display: grid;
     grid-template-columns: 1fr 1fr;
-    grid-template-rows: auto 1fr auto auto;
+    grid-template-rows: 1fr auto;
     column-gap: 8px;
     padding: 6px 14px 8px;
     overflow: hidden;
   }
-  .title {
-    grid-column: 1 / 3;
-    grid-row: 1;
-    font-size: 16px;
-    margin: 0 0 4px;
-  }
   .inputShell {
     grid-column: 1;
-    grid-row: 2;
+    grid-row: 1;
     height: auto;
   }
-  .sendRow {
-    grid-column: 1;
-    grid-row: 3;
-    margin-top: 6px;
-  }
-  #status {
-    grid-column: 1;
-    grid-row: 4;
-    margin-top: 2px;
-  }
+
   #mousePad {
     grid-column: 2;
-    grid-row: 2 / 5;
+    grid-row: 1 / 3;
     height: auto;
     margin-top: 0;
   }
@@ -1237,27 +1338,12 @@ button:disabled {
   #kbPanel {
     padding: 6px 8px calc(6px + env(safe-area-inset-bottom, 0px));
   }
-  /* 横屏标题行压缩后输入卡顶边上移，三横按钮贴顶让开最后一根杠 */
-  #menuBtn { top: 0; }
+  /* 横屏：三横按钮与抽屉面板均锚定在输入卡右侧窄条区域 */
 }
 </style>
 </head>
 <body>
-<button id="menuBtn" aria-label="菜单"><span class="bar"></span><span class="bar"></span><span class="bar"></span></button>
 <div id="panelMask"></div>
-<div id="panel">
-  <div class="panelHead">
-    <span class="panelTitle">功能菜单</span>
-    <button id="panelClose">×</button>
-  </div>
-  <div class="panelItem">电脑：<span id="pcName">—</span></div>
-  <button id="inboxOpenBtn" class="panelNav"><span>查看收件箱</span><span>›</span></button>
-  <label class="panelToggle"><span>粘贴后回车</span><input type="checkbox" id="enterToggle"></label>
-  <label class="panelToggle"><span>图片贴进框</span><input type="checkbox" id="imageToggle"></label>
-
-  <button id="fullscreenBtn" class="panelNav"><span>全屏模式</span><span>›</span></button>
-  <div class="panelNote">更多功能开发中…</div>
-</div>
 <div id="inboxView" hidden>
   <div class="inboxHead">
     <span class="panelTitle">电脑收件箱</span>
@@ -1271,21 +1357,35 @@ button:disabled {
   <img id="imgViewerImg" alt="">
   <button id="imgViewerClose">×</button>
 </div>
-<div id="connDot"></div>
-<div class="title">文字投递到电脑</div>
+
 <div class="inputShell">
   <button id="pcBell" aria-label="来自电脑的消息"><svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M12 3.5c-5 0-9 3.2-9 7.2 0 2.2 1.2 4.2 3.1 5.5-.1 1-.5 2.3-1.6 3.3 1.8-.2 3.3-.9 4.3-1.6 1 .3 2.1.4 3.2.4 5 0 9-3.2 9-7.2s-4-7.6-9-7.6z" fill="#09BB07"/><circle cx="8.7" cy="10.6" r="1.2" fill="#FFFFFF"/><circle cx="15.3" cy="10.6" r="1.2" fill="#FFFFFF"/></svg></button>
+  <div class="rightDivider"></div>
   <div id="attachBar"></div>
   <div id="pcInbox"></div>
   <textarea id="inputBox" placeholder="在这里输入文字，可用输入法语音转文字" autocomplete="off"></textarea>
-</div>
-<div class="sendRow">
-  <button id="pcSendBtn">发送到电脑端<span class="btnSub">仅文本</span></button>
-  <button id="sendBtn">粘贴到电脑文本框<span class="btnSub">文本和图片</span></button>
-  <button id="attachBtn" aria-label="添加附件">+</button>
-  <input type="file" id="cameraInput" accept="image/*" capture="environment" hidden>
-  <input type="file" id="imageInput" accept="image/*" multiple hidden>
-  <input type="file" id="docInput" accept="application/*,text/*" multiple hidden>
+  <div class="sendRow">
+    <button id="pcSendBtn">发送到电脑端<span class="btnSub">仅文本</span></button>
+    <button id="sendBtn">粘到电脑文本框<span class="btnSub">文本和图片</span></button>
+    <button id="attachBtn" aria-label="添加附件">+</button>
+    <input type="file" id="cameraInput" accept="image/*" capture="environment" hidden>
+    <input type="file" id="imageInput" accept="image/*" multiple hidden>
+    <input type="file" id="docInput" accept="application/*,text/*" multiple hidden>
+  </div>
+  <div class="sideToggle"><span>粘到电脑后回车</span><input type="checkbox" id="enterToggle"></div>
+  <button id="menuBtn" aria-label="菜单"><span class="bar"></span><span class="bar"></span><span class="bar"></span></button>
+  <div id="status"></div>
+  <div id="panel">
+    <div class="panelHead">
+      <span class="panelTitle">功能菜单</span>
+      <button id="panelClose">×</button>
+    </div>
+    <div class="panelItem">电脑：<span id="pcName">未连接</span></div>
+    <button id="inboxOpenBtn" class="panelNav"><span>查看收件箱</span><span>›</span></button>
+
+    <button id="fullscreenBtn" class="panelNav"><span>全屏模式</span><span>›</span></button>
+    <div class="panelNote">更多功能开发中…</div>
+  </div>
 </div>
 <div id="attachSheetMask"></div>
 <div id="attachSheet">
@@ -1451,8 +1551,8 @@ button:disabled {
     <label class="kbSetItem"><input type="checkbox" id="kbStickyToggle"><span>组合键后修饰键保持</span></label>
   </div>
 </div>
-<div id="status"></div>
 <div id="mousePad">
+
   <div class="padMain">
     <div id="touchpad">
       <div id="touchHint">滑动=移动 · 轻点=左键 · 双击按住=拖拽 · 双指点按=右键</div>
@@ -1473,7 +1573,7 @@ button:disabled {
 </div>
 <script>
 var statusEl = document.getElementById("status");
-var connDot = document.getElementById("connDot");
+var menuBtn = document.getElementById("menuBtn");
 var inputBox = document.getElementById("inputBox");
 var sendBtn = document.getElementById("sendBtn");
 var pcSendBtn = document.getElementById("pcSendBtn");
@@ -1481,7 +1581,7 @@ var panel = document.getElementById("panel");
 var panelMask = document.getElementById("panelMask");
 var pcName = document.getElementById("pcName");
 var enterToggle = document.getElementById("enterToggle");
-var imageToggle = document.getElementById("imageToggle");
+
 var attachBtn = document.getElementById("attachBtn");
 var cameraInput = document.getElementById("cameraInput");
 var imageInput = document.getElementById("imageInput");
@@ -1512,22 +1612,6 @@ function saveEnterPref() {
 enterToggle.checked = loadEnterPref();
 enterToggle.addEventListener("change", saveEnterPref);
 
-function loadImagePref() {
-  try {
-    return localStorage.getItem("sendImageEnabled") === "1";
-  } catch (err) {
-    return false;
-  }
-}
-
-function saveImagePref() {
-  try {
-    localStorage.setItem("sendImageEnabled", imageToggle.checked ? "1" : "0");
-  } catch (err) {}
-}
-
-imageToggle.checked = loadImagePref();
-imageToggle.addEventListener("change", saveImagePref);
 
 function renderFiles() {
   attachBar.innerHTML = "";
@@ -1915,13 +1999,26 @@ btnRight.addEventListener("touchstart", function (e) {
   hintFlash("右键");
 }, { passive: false });
 
+var statusTimer = null;
+
 function updateStatus(text, cls) {
+  if (statusTimer) {
+    clearTimeout(statusTimer);
+    statusTimer = null;
+  }
   statusEl.textContent = text;
   statusEl.className = cls || "";
+  if (text && (cls === "err" || cls === "ok")) {
+    statusTimer = setTimeout(function () {
+      statusEl.textContent = "";
+      statusEl.className = "";
+      statusTimer = null;
+    }, 4000);
+  }
 }
 
 function setDot(cls) {
-  connDot.className = cls || "";
+  menuBtn.className = cls || "";
 }
 
 var pcBell = document.getElementById("pcBell");
@@ -1991,6 +2088,8 @@ function renderPcMsgs(msgs) {
 function togglePcInbox() {
   var willOpen = !pcInbox.classList.contains("open");
   pcInbox.classList.toggle("open", willOpen);
+  inputBox.style.textIndent = willOpen ? "0" : "26px";
+  inputBox.style.paddingTop = willOpen ? "0" : "9px";
   if (!willOpen) {
     return;
   }
@@ -2010,13 +2109,17 @@ function togglePcInbox() {
 pcBell.addEventListener("click", togglePcInbox);
 
 function checkConnection() {
-  fetch("/ping").then(function (res) { return res.json(); }).then(function (data) {
+  var ctrl = new AbortController();
+  var timer = setTimeout(function () { ctrl.abort(); }, 3000);
+  fetch("/ping", { signal: ctrl.signal }).then(function (res) { return res.json(); }).then(function (data) {
+    clearTimeout(timer);
     setDot("ok");
-    pcName.textContent = data.hostname || "—";
+    pcName.textContent = data.hostname || "未连接";
     updatePcBell(data.pcLatest || 0);
   }).catch(function () {
+    clearTimeout(timer);
     setDot("err");
-    pcName.textContent = "—";
+    pcName.textContent = "未连接";
   });
 }
 
@@ -2033,7 +2136,7 @@ function sendText() {
   var form = new FormData();
   form.append("text", text);
   form.append("pressEnter", enterToggle.checked ? "1" : "0");
-  form.append("pasteImage", imageToggle.checked ? "1" : "0");
+  form.append("pasteImage", "1");
   pendingFiles.forEach(function (file) {
     form.append("files", file, file.name);
   });
@@ -2045,7 +2148,11 @@ function sendText() {
       inputBox.value = "";
       pendingFiles = [];
       renderFiles();
-      updateStatus("", "");
+      if (data.imagePasted > 0) {
+        updateStatus(data.message, "ok");
+      } else {
+        updateStatus("", "");
+      }
       inputBox.focus();
     } else {
       if (data.saved && data.saved.length) {
@@ -2160,7 +2267,7 @@ imgViewer.addEventListener("click", function (e) {
   if (e.target === imgViewer) closeImagePreview();
 });
 
-document.getElementById("menuBtn").addEventListener("click", openPanel);
+menuBtn.addEventListener("click", openPanel);
 document.getElementById("panelClose").addEventListener("click", closePanel);
 panelMask.addEventListener("click", closePanel);
 document.getElementById("inboxOpenBtn").addEventListener("click", openInbox);
@@ -2241,7 +2348,7 @@ function sendToDesktop() {
 sendBtn.addEventListener("click", sendText);
 pcSendBtn.addEventListener("click", sendToDesktop);
 checkConnection();
-setInterval(checkConnection, 10000);
+setInterval(checkConnection, 3000);
 
 // ---------- 电脑键盘（触控板左上角按钮弹出，两页键位横向滑动翻页） ----------
 var kbBtn = document.getElementById("kbBtn");
@@ -2751,12 +2858,19 @@ def send():
                     enterSent = True
                 except Exception:
                     enterSent = False
+        elif imagePasted and pressEnter:
+            try:
+                time.sleep(ENTER_DELAY_SECONDS)
+                pyautogui.press("enter")
+                enterSent = True
+            except Exception:
+                enterSent = False
     if not hasText:
         if imagePasted:
-            return jsonify(ok=True, pasted=False, enterSent=False, saved=saved, imagePasted=imagePasted, message="图片已粘贴，原图已存入电脑收件箱")
+            return jsonify(ok=True, pasted=False, enterSent=enterSent, saved=saved, imagePasted=imagePasted, message="图片已粘贴，并存放至收件箱")
         return jsonify(ok=True, pasted=False, enterSent=False, saved=saved, imagePasted=0, message="文件已存入电脑收件箱")
     if pasted:
-        return jsonify(ok=True, pasted=True, enterSent=enterSent, saved=saved, imagePasted=imagePasted, message="已发送并粘贴到电脑光标处")
+        return jsonify(ok=True, pasted=True, enterSent=enterSent, saved=saved, imagePasted=imagePasted, message="已发送并粘贴到电脑光标处，并存放至收件箱")
     return jsonify(ok=True, pasted=False, enterSent=False, saved=saved, imagePasted=imagePasted, message="文字已存入电脑剪贴板，可手动 Ctrl+V")
 
 
