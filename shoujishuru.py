@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-import base64
+
 import ctypes
 import json
 import logging
@@ -287,7 +287,7 @@ if getattr(sys, "frozen", False):
 else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ATTACH_DIR = os.path.join(BASE_DIR, "收件箱")
-MAX_UPLOAD_MB = 200
+MAX_UPLOAD_MB = 1000
 
 pasteLock = threading.Lock()
 mouseLock = threading.Lock()
@@ -831,7 +831,7 @@ button:disabled {
 
 #status {
   position: absolute;
-  bottom: 47px;
+  bottom: 48px;
   left: 0;
   right: 0;
   text-align: center;
@@ -843,6 +843,23 @@ button:disabled {
 #status.ok { color: rgb(35, 150, 95); }
 #status.err { color: rgb(205, 75, 75); }
 #status:empty { display: none; }
+#statusBar {
+  position: absolute;
+  bottom: 47px;
+  left: 0;
+  right: 40px;
+  height: 3px;
+  background: rgb(224, 234, 250);
+  display: none;
+  z-index: 5;
+  pointer-events: none;
+}
+#statusBar.on { display: block; }
+#statusBarFill {
+  height: 100%;
+  width: 0;
+  background: rgb(64, 110, 255);
+}
 #menuBtn {
   position: absolute;
   top: 0;
@@ -1296,6 +1313,7 @@ button:disabled {
   <div class="sideToggle"><span>粘到电脑后回车</span><input type="checkbox" id="enterToggle"></div>
   <button id="menuBtn" aria-label="菜单"><span class="bar"></span><span class="bar"></span><span class="bar"></span></button>
   <div id="status"></div>
+  <div id="statusBar"><div id="statusBarFill"></div></div>
   <div id="panel">
     <div class="panelHead">
       <span class="panelTitle">功能菜单</span>
@@ -1497,6 +1515,8 @@ button:disabled {
 </div>
 <script>
 var statusEl = document.getElementById("status");
+var statusBar = document.getElementById("statusBar");
+var statusBarFill = document.getElementById("statusBarFill");
 var menuBtn = document.getElementById("menuBtn");
 var inputBox = document.getElementById("inputBox");
 var sendBtn = document.getElementById("sendBtn");
@@ -2096,6 +2116,8 @@ function checkConnection() {
   });
 }
 
+var MAX_UPLOAD_MB = 1000;
+
 function sendText() {
   var text = inputBox.value;
   var hasFiles = pendingFiles.length > 0;
@@ -2103,9 +2125,19 @@ function sendText() {
     updateStatus("请先输入文字或添加附件", "err");
     return;
   }
+  for (var i = 0; i < pendingFiles.length; i++) {
+    if (pendingFiles[i].size > MAX_UPLOAD_MB * 1048576) {
+      updateStatus("文件「" + pendingFiles[i].name + "」超过 " + MAX_UPLOAD_MB + "MB 上限", "err");
+      return;
+    }
+  }
   sendBtn.disabled = true;
   attachBtn.disabled = true;
   updateStatus("发送中…");
+  statusBar.classList.add("on");
+  statusBarFill.style.width = "0%";
+  statusEl.style.fontSize = "15px";
+  statusEl.style.color = "rgb(64, 110, 255)";
   var form = new FormData();
   form.append("text", text);
   form.append("pressEnter", enterToggle.checked ? "1" : "0");
@@ -2113,10 +2145,36 @@ function sendText() {
   pendingFiles.forEach(function (file) {
     form.append("files", file, file.name);
   });
-  fetch("/send", { method: "POST", body: form })
-    .then(function (res) { return res.json(); }).then(function (data) {
+  var xhr = new XMLHttpRequest();
+  xhr.open("POST", "/send");
+  var lastProg = 0;
+  xhr.upload.onprogress = function (ev) {
+    if (!ev.lengthComputable) {
+      return;
+    }
+    var now = Date.now();
+    if (ev.loaded < ev.total && now - lastProg < 300) {
+      return;
+    }
+    lastProg = now;
+    var pct = Math.min(100, ev.loaded * 100 / ev.total);
+    statusBarFill.style.width = pct + "%";
+    if (ev.loaded < ev.total) {
+      updateStatus("上传中 " + Math.round(pct) + "%（" + Math.round(ev.loaded / 1048576) + "MB/" + Math.round(ev.total / 1048576) + "MB）");
+    } else {
+      updateStatus("电脑端处理中…");
+    }
+  };
+  xhr.onload = function () {
+    statusBar.classList.remove("on");
+    statusEl.style.fontSize = "";
+    statusEl.style.color = "";
     sendBtn.disabled = false;
     attachBtn.disabled = false;
+    var data = {};
+    try {
+      data = JSON.parse(xhr.responseText);
+    } catch (err) {}
     if (data.ok) {
       inputBox.value = "";
       pendingFiles = [];
@@ -2135,14 +2193,19 @@ function sendText() {
         });
         renderFiles();
       }
-      updateStatus(data.message, "err");
+      updateStatus(data.message || "发送失败，请检查连接", "err");
     }
-  }).catch(function () {
+  };
+  xhr.onerror = function () {
+    statusBar.classList.remove("on");
+    statusEl.style.fontSize = "";
+    statusEl.style.color = "";
     sendBtn.disabled = false;
     attachBtn.disabled = false;
     setDot("err");
     updateStatus("发送失败，请检查连接", "err");
-  });
+  };
+  xhr.send(form);
 }
 
 function openPanel() {
@@ -2763,23 +2826,140 @@ def saveAttachment(file):
     return rawName, os.path.basename(target)
 
 
+CF_DIB = 8
+DIB_RGB_COLORS = 0
+GMEM_MOVEABLE = 0x0002
+
+
+class _BITMAPINFOHEADER(ctypes.Structure):
+    _fields_ = [
+        ("biSize", ctypes.c_uint32),
+        ("biWidth", ctypes.c_int32),
+        ("biHeight", ctypes.c_int32),
+        ("biPlanes", ctypes.c_uint16),
+        ("biBitCount", ctypes.c_uint16),
+        ("biCompression", ctypes.c_uint32),
+        ("biSizeImage", ctypes.c_uint32),
+        ("biXPelsPerMeter", ctypes.c_int32),
+        ("biYPelsPerMeter", ctypes.c_int32),
+        ("biClrUsed", ctypes.c_uint32),
+        ("biClrImportant", ctypes.c_uint32),
+    ]
+
+
+class _GdiplusStartupInput(ctypes.Structure):
+    _fields_ = [
+        ("GdiplusVersion", ctypes.c_uint32),
+        ("DebugEventCallback", ctypes.c_void_p),
+        ("SuppressBackgroundThread", ctypes.c_int32),
+        ("SuppressExternalCodecs", ctypes.c_int32),
+    ]
+
+
 def writeClipboardImage(imagePath):
-    script = (
-        "Add-Type -AssemblyName System.Windows.Forms;"
-        "Add-Type -AssemblyName System.Drawing;"
-        "$img=[System.Drawing.Image]::FromFile('"
-        + imagePath.replace("'", "''") + "');"
-        "[System.Windows.Forms.Clipboard]::SetImage($img);"
-        "$img.Dispose()"
-    )
-    encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
-    result = subprocess.run(
-        ["powershell", "-NoProfile", "-STA", "-EncodedCommand", encoded],
-        capture_output=True,
-        timeout=20,
-    )
-    if result.returncode != 0:
-        raise RuntimeError("PowerShell 写入剪贴板失败")
+    # 纯 ctypes GDI+ 直写 CF_DIB：进程内完成，不拉起任何 shell 子进程
+    # （无签名 exe 作父进程启动 powershell.exe 会触发 360 行为防护"命令执行攻击"，
+    # exe 白名单管不住该行为链；GDI+ 是系统组件，解码 PNG/JPG/BMP 均支持）
+    gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
+    gdiplus = ctypes.WinDLL("gdiplus", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+    gdiplus.GdiplusStartup.argtypes = [ctypes.POINTER(ctypes.c_size_t), ctypes.POINTER(_GdiplusStartupInput), ctypes.c_void_p]
+    gdiplus.GdiplusStartup.restype = ctypes.c_int32
+    gdiplus.GdiplusShutdown.argtypes = [ctypes.c_size_t]
+    gdiplus.GdipCreateBitmapFromFile.argtypes = [ctypes.c_wchar_p, ctypes.POINTER(ctypes.c_void_p)]
+    gdiplus.GdipCreateBitmapFromFile.restype = ctypes.c_int32
+    gdiplus.GdipCreateHBITMAPFromBitmap.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p), ctypes.c_uint32]
+    gdiplus.GdipCreateHBITMAPFromBitmap.restype = ctypes.c_int32
+    gdiplus.GdipDisposeImage.argtypes = [ctypes.c_void_p]
+    gdiplus.GdipDisposeImage.restype = ctypes.c_int32
+    gdi32.GetDIBits.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint, ctypes.c_uint, ctypes.c_void_p, ctypes.POINTER(_BITMAPINFOHEADER), ctypes.c_uint]
+    gdi32.GetDIBits.restype = ctypes.c_int32
+    gdi32.DeleteObject.argtypes = [ctypes.c_void_p]
+    user32.GetDC.argtypes = [ctypes.c_void_p]
+    user32.GetDC.restype = ctypes.c_void_p
+    user32.ReleaseDC.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    user32.OpenClipboard.argtypes = [ctypes.c_void_p]
+    user32.OpenClipboard.restype = ctypes.c_bool
+    user32.EmptyClipboard.argtypes = []
+    user32.CloseClipboard.restype = ctypes.c_bool
+    user32.SetClipboardData.argtypes = [ctypes.c_uint, ctypes.c_void_p]
+    user32.SetClipboardData.restype = ctypes.c_void_p
+    kernel32.GlobalAlloc.argtypes = [ctypes.c_uint, ctypes.c_size_t]
+    kernel32.GlobalAlloc.restype = ctypes.c_void_p
+    kernel32.GlobalFree.argtypes = [ctypes.c_void_p]
+    kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
+    kernel32.GlobalLock.restype = ctypes.c_void_p
+    kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+
+    token = ctypes.c_size_t(0)
+    startup = _GdiplusStartupInput(1, None, 0, 0)
+    if gdiplus.GdiplusStartup(ctypes.byref(token), ctypes.byref(startup), None) != 0:
+        raise RuntimeError("GDI+ 初始化失败")
+    try:
+        bmp = ctypes.c_void_p()
+        status = gdiplus.GdipCreateBitmapFromFile(ctypes.c_wchar_p(os.path.abspath(imagePath)), ctypes.byref(bmp))
+        if status != 0 or not bmp.value:
+            raise RuntimeError("图片解码失败（GDI+ 状态 %d）" % status)
+        try:
+            hbm = ctypes.c_void_p()
+            # 背景白色合成：透明 PNG 贴出白底而不是黑底
+            status = gdiplus.GdipCreateHBITMAPFromBitmap(bmp, ctypes.byref(hbm), 0xFFFFFFFF)
+            if status != 0 or not hbm.value:
+                raise RuntimeError("位图转换失败（GDI+ 状态 %d）" % status)
+            try:
+                hdc = user32.GetDC(None)
+                if not hdc:
+                    raise RuntimeError("GetDC 失败")
+                try:
+                    bi = _BITMAPINFOHEADER()
+                    bi.biSize = ctypes.sizeof(_BITMAPINFOHEADER)
+                    if not gdi32.GetDIBits(hdc, hbm, 0, 0, None, ctypes.byref(bi), DIB_RGB_COLORS):
+                        raise RuntimeError("读取位图信息失败")
+                    # 统一转 24bpp BI_RGB：GDI+ HBITMAP 原生 32bpp BI_BITFIELDS，
+                    # 40 字节头下无掩码区粘贴到应用会解析异常；24bpp 兼容性最好
+                    bi.biCompression = 0
+                    bi.biBitCount = 24
+                    stride = ((bi.biWidth * bi.biBitCount + 31) // 32) * 4
+                    data_size = stride * abs(bi.biHeight)
+                    total = bi.biSize + data_size
+                    h = kernel32.GlobalAlloc(GMEM_MOVEABLE, total)
+                    if not h:
+                        raise RuntimeError("GlobalAlloc 失败")
+                    p = kernel32.GlobalLock(h)
+                    if not p:
+                        kernel32.GlobalFree(h)
+                        raise RuntimeError("GlobalLock 失败")
+                    try:
+                        ctypes.memmove(p, ctypes.byref(bi), bi.biSize)
+                        if not gdi32.GetDIBits(hdc, hbm, 0, bi.biHeight, p + bi.biSize, ctypes.byref(bi), DIB_RGB_COLORS):
+                            raise RuntimeError("读取位图数据失败")
+                    finally:
+                        kernel32.GlobalUnlock(h)
+                    opened = False
+                    for _ in range(10):
+                        if user32.OpenClipboard(None):
+                            opened = True
+                            break
+                        time.sleep(0.05)
+                    if not opened:
+                        kernel32.GlobalFree(h)
+                        raise RuntimeError("打开剪贴板失败（被其他程序占用）")
+                    try:
+                        user32.EmptyClipboard()
+                        if not user32.SetClipboardData(CF_DIB, h):
+                            kernel32.GlobalFree(h)
+                            raise RuntimeError("写入剪贴板失败")
+                    finally:
+                        user32.CloseClipboard()
+                finally:
+                    user32.ReleaseDC(None, hdc)
+            finally:
+                gdi32.DeleteObject(hbm)
+        finally:
+            gdiplus.GdipDisposeImage(bmp)
+    finally:
+        gdiplus.GdiplusShutdown(token)
 
 
 def pasteImagesToCursor(imagePaths):
