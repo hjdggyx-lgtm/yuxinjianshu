@@ -898,7 +898,7 @@ button:disabled {
   transition: clip-path 0.25s ease, visibility 0s linear 0.25s;
   visibility: hidden;
   z-index: 50;
-  padding: 14px 12px;
+  padding: 10px 12px;
 }
 #panel.open {
   clip-path: inset(0 0 0 0);
@@ -909,7 +909,7 @@ button:disabled {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 6px;
+  margin-bottom: 4px;
 }
 .panelTitle {
   font-size: 16px;
@@ -932,7 +932,7 @@ button:disabled {
 .panelItem {
   font-size: 13px;
   color: rgb(70, 85, 115);
-  padding: 8px 4px;
+  padding: 5px 4px;
   border-bottom: 1px solid rgb(232, 236, 244);
 }
 .panelItem span { color: rgb(40, 70, 140); font-weight: 500; }
@@ -940,9 +940,7 @@ button:disabled {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  font-size: 13px;
-  color: rgb(70, 85, 115);
-  padding: 8px 4px;
+  padding: 5px 4px;
   border-bottom: 1px solid rgb(232, 236, 244);
 }
 .panelToggle input {
@@ -952,14 +950,14 @@ button:disabled {
   accent-color: rgb(64, 110, 255);
 }
 .panelNote {
-  margin-top: 10px;
+  margin-top: 6px;
   font-size: 12px;
   color: rgb(160, 170, 190);
 }
 .panelNav {
   width: 100%;
   margin-top: 0;
-  padding: 8px 4px;
+  padding: 5px 4px;
   border: none;
   border-radius: 0;
   background: transparent;
@@ -1981,6 +1979,19 @@ function updatePcBell(latestId) {
     uiVibe();
   }
   pcBellSeenId = latestId;
+  var hasRead = false;
+  try {
+    hasRead = localStorage.getItem("pcLastRead") !== null;
+  } catch (err) {}
+  if (!hasRead) {
+    // 新设备/新浏览器首次使用：当前历史消息全部视为已读，不亮红点
+    // 红点只提示本设备用过之后到达的新消息
+    try {
+      localStorage.setItem("pcLastRead", String(latestId));
+    } catch (err) {}
+    pcBell.classList.remove("hasUnread");
+    return;
+  }
   pcBell.classList.toggle("hasUnread", latestId > getPcLastRead());
 }
 
@@ -2700,10 +2711,7 @@ def getLanIps():
 
 def saveToClipboard(text):
     pyperclip.copy(text)
-    try:
-        return pyperclip.paste().replace("\r\n", "\n") == text
-    except Exception:
-        return True
+    return True
 
 
 def pasteAtCursor():
