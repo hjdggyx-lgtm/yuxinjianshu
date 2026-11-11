@@ -2917,7 +2917,7 @@ def send():
     imagePasted = 0
     hasText = bool(text.strip())
     with pasteLock:
-        if imagePaths:
+        if imagePaths and pressEnter:
             try:
                 imagePasted = pasteImagesToCursor(imagePaths)
             except Exception as exc:
@@ -2943,7 +2943,7 @@ def send():
                     enterSent = True
                 except Exception:
                     enterSent = False
-        elif imagePasted and pressEnter:
+        elif imagePasted:
             try:
                 time.sleep(ENTER_DELAY_SECONDS)
                 pyautogui.press("enter")
@@ -2953,8 +2953,12 @@ def send():
     if not hasText:
         if imagePasted:
             return jsonify(ok=True, pasted=False, enterSent=enterSent, saved=saved, imagePasted=imagePasted, message="图片已粘贴，并存放至收件箱")
+        if imagePaths:
+            return jsonify(ok=True, pasted=False, enterSent=False, saved=saved, imagePasted=0, message="图片已存入电脑收件箱（开关未勾选，未粘贴）")
         return jsonify(ok=True, pasted=False, enterSent=False, saved=saved, imagePasted=0, message="文件已存入电脑收件箱")
     if pasted:
+        if imagePaths and not imagePasted:
+            return jsonify(ok=True, pasted=True, enterSent=enterSent, saved=saved, imagePasted=0, message="文字已粘贴到电脑光标处，图片仅存入收件箱（开关未勾选，未粘贴）")
         return jsonify(ok=True, pasted=True, enterSent=enterSent, saved=saved, imagePasted=imagePasted, message="已发送并粘贴到电脑光标处，并存放至收件箱")
     return jsonify(ok=True, pasted=False, enterSent=False, saved=saved, imagePasted=imagePasted, message="文字已存入电脑剪贴板，可手动 Ctrl+V")
 
