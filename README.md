@@ -33,15 +33,19 @@
 
 ## 怎么用
 
-1. 电脑上运行（Windows，Python 3.12+）：
+1. 到 [Releases](https://github.com/hjdggyx-lgtm/yuxinjianshu/releases) 下载绿色版压缩包，解压到任意文件夹
+2. 双击 `shoujishuru.exe`，桌面窗口显示连接地址（不写注册表、不装服务，整个文件夹拷走就能用）
+3. 手机连**同一个 Wi-Fi**，浏览器打开该地址（如 `http://192.168.x.x:8765`）
+4. 右上角圆点变绿即已连接，开打
 
-   ```bash
-   pip install flask pyperclip pyautogui
-   python shoujishuru.py
-   ```
+## 从源码运行（可选）
 
-2. 手机连**同一个 Wi-Fi**，浏览器打开电脑显示的地址（如 `http://192.168.x.x:8765`）
-3. 右上角圆点变绿即已连接，开打
+```bash
+pip install flask pyperclip pyautogui
+python shoujishuru.py
+```
+
+需要 Windows + Python 3.12+。
 
 ## 两句话说明
 
