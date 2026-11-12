@@ -2025,6 +2025,7 @@ function renderPcMsgs(msgs) {
     var timeDiv = document.createElement("div");
     timeDiv.className = "pcChipTime";
     timeDiv.textContent = (item.src === "phone" ? "我发送的" : "来自电脑") + " · " + item.time + " · 点击复制";
+    timeDiv.style.color = item.src === "phone" ? "rgb(180, 83, 9)" : "rgb(37, 99, 235)";
     var textDiv = document.createElement("div");
     textDiv.textContent = item.text;
     chip.appendChild(timeDiv);
@@ -3035,12 +3036,24 @@ def sendPcMsg(text, src="pc"):
         pcMsgList.append({
             "id": pcMsgLastId,
             "text": text,
-            "time": time.strftime("%H:%M:%S"),
+            "time": time.strftime("%Y/%m/%d %H:%M:%S"),
             "src": src,
         })
         del pcMsgList[:-PC_MSG_MAX]
         savePcMsgs()
     return True, ""
+
+
+def msgTimeStr(m):
+    # 统一消息时间显示为 "年/月/日 时:分:秒"；旧记录 time 只有 %H:%M:%S，
+    # 用 id（收到消息时的毫秒时间戳）补出日期部分，新旧记录格式一致
+    t = m.get("time") or ""
+    if len(t) == 8 and t.count(":") == 2:
+        try:
+            return time.strftime("%Y/%m/%d ", time.localtime(int(m["id"]) / 1000)) + t
+        except Exception:
+            pass
+    return t
 
 
 @app.get("/pcmsgs")
@@ -3308,6 +3321,13 @@ def runDesktopApp(ips, serverErrorBox):
     # 桌面窗口：电脑→手机传信。Flask 在后台线程继续服务手机端。
     import tkinter as tk
 
+    # 打开软件即创建收件箱空文件夹（绿色便携，exe 同级）：
+    # 否则要等第一次传文件才生成，期间点"收件箱"链接毫无反应
+    try:
+        os.makedirs(ATTACH_DIR, exist_ok=True)
+    except Exception as exc:
+        print("收件箱文件夹创建失败：%r" % exc, flush=True)
+
     BG = "#E8ECF4"
     PANEL_BLUE = "#C4DEFE"
     BORDER = "#7896CD"
@@ -3321,14 +3341,55 @@ def runDesktopApp(ips, serverErrorBox):
 
     root = tk.Tk()
     root.title("手机输入 · 电脑端")
+    # 先隐藏窗口：几何（记忆的尺寸/位置）就绪前不显示，消除启动时
+    # 默认尺寸→记忆尺寸的跳变（闪一下），就绪后 deiconify 再出现
+    root.withdraw()
     root.minsize(430, 240)
     root.configure(bg=BG)
 
+    # 窗口大小与位置持久化：关闭时存 exe 同级"窗口设置.json"（绿色便携），
+    # 启动时恢复，拉大拉小、拖动位置后下次打开保持原样
+    winGeomFile = os.path.join(BASE_DIR, "窗口设置.json")
+
+    def loadWinGeom():
+        try:
+            with open(winGeomFile, "r", encoding="utf-8") as fh:
+                g = str(json.load(fh).get("geometry") or "")
+        except Exception:
+            return None
+        m = re.match(r"^(\d+)x(\d+)([+-]\d+)([+-]\d+)$", g.strip())
+        if not m:
+            return None
+        x, y = int(m.group(3)), int(m.group(4))
+        # 防窗口跑到屏幕外找不回：夹回可见区域
+        x = max(0, min(x, root.winfo_screenwidth() - 120))
+        y = max(0, min(y, root.winfo_screenheight() - 60))
+        return "%sx%s+%d+%d" % (m.group(1), m.group(2), x, y)
+
+    def saveWinGeom():
+        try:
+            with open(winGeomFile, "w", encoding="utf-8") as fh:
+                json.dump({"geometry": root.geometry()}, fh)
+        except Exception as exc:
+            print("窗口设置保存失败：%r" % exc, flush=True)
+
+    def on_close():
+        saveWinGeom()
+        root.destroy()
+
+    root.protocol("WM_DELETE_WINDOW", on_close)
+    savedGeom = loadWinGeom()
+
     def openAttachDir(event=None):
+        # 点击兜底：文件夹万一被删/启动时创建失败过，先补建再打开，保证有回响
+        try:
+            os.makedirs(ATTACH_DIR, exist_ok=True)
+        except Exception:
+            pass
         try:
             os.startfile(ATTACH_DIR)
         except Exception:
-            pass
+            showStatus("收件箱文件夹打开失败", RED)
 
     infoText1 = "服务运行中，手机浏览器访问：\n" + "\n".join(
         "http://%s:%d" % (ip, PORT) for ip in ips)
@@ -3373,17 +3434,20 @@ def runDesktopApp(ips, serverErrorBox):
     chatList = tk.Text(paned, font=FONT, height=6, bd=0, highlightthickness=0,
                        bg="#FFFFFF", fg=TEXT, wrap="word", padx=10, pady=6,
                        state="normal")
-    # 每行所有字符（时间/内容/勾/换行）的 justify 必须显式一致——
-    # Tk Text 在一行内多 tag justify 不一致时结果不确定（time=right 曾把
-    # phoneMsg 左对齐的行拽回右边）。电脑行全 right、手机行全 left。
-    chatList.tag_config("timeL", foreground="#8C96AF", font=("微软雅黑", 9),
+    # 全部消息统一左对齐（不再电脑右/手机左各占一边）——
+    # 行内所有字符（时间/内容/勾/换行）justify 必须显式一致，
+    # Tk Text 在一行内多 tag justify 不一致时结果不确定
+    # 时间行按发送者着色（与手机端气泡一致）：自己"我发送的"=暖橙 rgb(180,83,9)，
+    # 对方"来自手机"=靛蓝 rgb(37,99,235)；避开绿（复制成功）/红（失败）语义色
+    chatList.tag_config("timeL", foreground="#2563EB", font=("微软雅黑", 9),
                         justify="left")
-    chatList.tag_config("timeR", foreground="#8C96AF", font=("微软雅黑", 9),
-                        justify="right")
-    chatList.tag_config("msg", foreground="#283246", justify="right")
+    chatList.tag_config("timeR", foreground="#B45309", font=("微软雅黑", 9),
+                        justify="left")
+    chatList.tag_config("msg", foreground="#283246", justify="left")
     chatList.tag_config("phoneMsg", foreground="#283246", justify="left")
-    chatList.tag_config("ok", foreground=GREEN, justify="right")
-    chatList.tag_config("hint", foreground="#9AA3B8", justify="right")
+    chatList.tag_config("ok", foreground=GREEN, justify="left")
+    chatList.tag_config("err", foreground=RED, justify="left")
+    chatList.tag_config("hint", foreground="#9AA3B8", justify="left")
     chatList.insert("1.0", "发送到手机的消息会显示在这里", "hint")
     chatList.config(state="disabled")
     paned.add(chatList, minsize=70, stretch="always")
@@ -3411,20 +3475,59 @@ def runDesktopApp(ips, serverErrorBox):
         else:
             statusLabel.pack_forget()
 
+    chatSeq = [0]
+
+    def setCopyHint(tag, ctag, note, styleTag):
+        # 精确替换时间行尾的提示字（点击复制/已复制/复制失败），不动"谁发的 · 时间"
+        rng = chatList.tag_ranges(ctag)
+        if len(rng) < 2:
+            return
+        s, e = str(rng[0]), str(rng[1])
+        chatList.config(state="normal")
+        chatList.delete(s, e)
+        chatList.insert(s, note, (styleTag, ctag, tag))
+        chatList.config(state="disabled")
+
+    def copyChat(msgText, tag, ctag, timeTag):
+        # 点击复制：pyperclip 进电脑剪贴板（对齐手机端气泡"点击复制"）。
+        # 只把行尾"点击复制"临时变"已复制"（绿字）/"复制失败"（红字），
+        # 约 3 秒后自动变回"点击复制"，不覆盖发送者与时间信息
+        try:
+            pyperclip.copy(msgText)
+            note, noteTag = "已复制", "ok"
+            appendLog("已复制聊天消息到电脑剪贴板")
+        except Exception as exc:
+            note, noteTag = "复制失败", "err"
+            appendLog("复制失败：%r" % exc)
+        setCopyHint(tag, ctag, note, noteTag)
+        root.after(3000, lambda: setCopyHint(tag, ctag, "点击复制", timeTag))
+
     def appendChat(text, phone=False, timeStr=None):
-        # 聊天流：时间灰字 + 消息内容一行，自动滚到底部；
-        # 电脑发的全行右对齐（timeR+msg+ok），手机发来的全行左对齐（timeL+phoneMsg）。
-        # 行内所有字符 justify 必须同值——Tk Text 多 tag justify 不一致时结果不确定
+        # 聊天流：时间行 = 谁发的 · 时间 · 点击复制（同手机端气泡格式），
+        # 消息内容在下一行，自动滚到底部；全部左对齐（不再一人一边）。
+        # 每条消息挂动态 tag m{n}（覆盖时间行+消息行+勾），点击任意位置复制整条消息；
+        # 提示字"点击复制"单独挂 c{n}，复制后只换这几个字，3 秒自动还原
         bodyTag = "phoneMsg" if phone else "msg"
         timeTag = "timeL" if phone else "timeR"
+        chatSeq[0] += 1
+        tag = "m%d" % chatSeq[0]
+        ctag = "c%d" % chatSeq[0]
+        chatList.tag_config(tag)
+        chatList.tag_config(ctag)
+        chatList.tag_bind(tag, "<Button-1>",
+                          lambda e, t=text, tg=tag, ct=ctag, tt=timeTag: copyChat(t, tg, ct, tt))
         chatList.config(state="normal")
         if chatHint[0]:
             chatList.delete("1.0", "end")
             chatHint[0] = False
-        chatList.insert("end", (timeStr or time.strftime("%H:%M:%S")) + "  ", timeTag)
-        chatList.insert("end", text, bodyTag)
+        sender = "来自手机" if phone else "我发送的"
+        chatList.insert("end", sender + " · " + (timeStr or time.strftime("%Y/%m/%d %H:%M:%S")) + " · ",
+                        (timeTag, tag))
+        chatList.insert("end", "点击复制", (timeTag, tag, ctag))
+        chatList.insert("end", "\n", (timeTag, tag))
+        chatList.insert("end", text, (bodyTag, tag))
         if not phone:
-            chatList.insert("end", " ✓", "ok")
+            chatList.insert("end", " ✓", ("ok", tag))
         chatList.insert("end", "\n", bodyTag)
         chatList.see("end")
         chatList.config(state="disabled")
@@ -3433,7 +3536,7 @@ def runDesktopApp(ips, serverErrorBox):
     with pcMsgLock:
         history = [dict(m) for m in pcMsgList]
     for m in history:
-        appendChat(m["text"], phone=(m.get("src") == "phone"), timeStr=m["time"])
+        appendChat(m["text"], phone=(m.get("src") == "phone"), timeStr=msgTimeStr(m))
 
     # 运行日志：默认折叠，点按钮展开向下撑开窗口，再点收起
     logOpen = [False]
@@ -3456,22 +3559,33 @@ def runDesktopApp(ips, serverErrorBox):
 
     def syncWindowHeight():
         root.update_idletasks()
-        root.geometry("460x%d" % max(root.winfo_reqheight(), 240))
+        # 宽度跟随用户当前窗口宽（不再硬编码 460 弹回），高度按内容需求
+        root.geometry("%dx%d" % (max(root.winfo_width(), 460),
+                                 max(root.winfo_reqheight(), 240)))
 
     def toggleLog():
         logOpen[0] = not logOpen[0]
         if logOpen[0]:
             logBtn.config(text="▴ 运行日志")
-            logWrap.pack(fill="x", padx=11, pady=(2, 0), after=logBtn)
-            # 展开日志：只有当窗口高度小于内容需求时才撑开；
-            # 用户已拉大的窗口让消息展示框自行收缩吸收，不回弹
-            root.update_idletasks()
-            if root.winfo_height() < root.winfo_reqheight():
-                root.geometry("460x%d" % root.winfo_reqheight())
+            # 先量日志容器总占用 = 自身需求高 + pack pady（上 2px + 下 11px，
+            # 下 11px 是日志框底边与窗口底边的间距，不能贴边）——
+            # 少算 pady 窗口就撑不足，聊天流会被压缩（轻微跳一下）；
+            # 窗口撑开与插入日志两个请求连发、不中间 update——
+            # 由主循环一轮统一应用，无"日志占位压缩聊天流"的中间帧（不闪）
+            logNeed = logWrap.winfo_reqheight() + 2 + 11
+            h = root.winfo_height()
+            newH = max(h, min(h + logNeed, root.winfo_screenheight() - 40))
+            root.geometry("%dx%d" % (max(root.winfo_width(), 460), newH))
+            logWrap.pack(fill="x", padx=11, pady=(2, 11), after=logBtn)
         else:
             logBtn.config(text="▾ 运行日志")
+            # 收起对称收缩同样的总占用（容器高 + pady 2+11px），聊天流高度分毫不变，
+            # 反复开关窗口总高不漂移（否则聊天流会一路被撑大）
+            logNeed = logWrap.winfo_reqheight() + 2 + 11
             logWrap.pack_forget()
-            # 收起日志：不回弹窗口，释放的空间由消息展示框吸收
+            h = root.winfo_height()
+            newH = max(240, h - logNeed)
+            root.geometry("%dx%d" % (max(root.winfo_width(), 460), newH))
 
     logBtn = tk.Button(root, text="▾ 运行日志", font=FONT, bg=BG, fg=MUTED,
                        relief="flat", bd=0, cursor="hand2", anchor="w",
@@ -3524,14 +3638,19 @@ def runDesktopApp(ips, serverErrorBox):
             if pcMsgList:
                 guiLastShown[0] = pcMsgList[-1]["id"]
         for m in news:
-            appendChat(m["text"], phone=True, timeStr=m["time"])
+            appendChat(m["text"], phone=True, timeStr=msgTimeStr(m))
             appendLog("手机 → 桌面：%s" % m["text"])
         root.after(2000, pollPhoneMsgs)
     root.after(2000, pollPhoneMsgs)
 
     root.update_idletasks()
-    root.geometry("460x%d" % max(root.winfo_reqheight(), 240))
+    if savedGeom:
+        root.geometry(savedGeom)
+    else:
+        root.geometry("460x%d" % max(root.winfo_reqheight(), 240))
     appendLog("服务已启动，等待手机连接（手机打开上方地址即可）")
+    # 几何全部就绪后才显示窗口，直接以最终大小+位置出现，无跳变
+    root.deiconify()
     root.mainloop()
 
 
