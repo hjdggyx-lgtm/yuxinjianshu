@@ -13,6 +13,24 @@
 - **虚拟键盘**：字母数字、标点符号、F 键、Win/Ctrl/Shift/Alt 修饰键，能按 Win 弹开始菜单、Shift 切中英文
 - **电脑端小窗口**：连接状态、聊天消息、运行日志一目了然
 
+## 界面预览
+
+<table>
+  <tr>
+    <td align="center"><img src="docs/phone-main.jpg" width="200"><br>文字投递 + 触控板</td>
+    <td align="center"><img src="docs/phone-menu.jpg" width="200"><br>功能菜单</td>
+    <td align="center"><img src="docs/phone-voice.jpg" width="200"><br>语音转文字</td>
+    <td align="center"><img src="docs/phone-keyboard.jpg" width="200"><br>虚拟键盘</td>
+  </tr>
+  <tr>
+    <td align="center" colspan="2"><img src="docs/phone-landscape.jpg" width="390"><br>横屏双面板</td>
+    <td align="center" colspan="2"><img src="docs/phone-keyboard-full.jpg" width="390"><br>全功能键盘</td>
+  </tr>
+  <tr>
+    <td align="center" colspan="4"><img src="docs/desktop-window.png" width="300"><br>电脑端窗口</td>
+  </tr>
+</table>
+
 ## 怎么用
 
 1. 电脑上运行（Windows，Python 3.12+）：
