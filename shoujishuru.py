@@ -3340,36 +3340,107 @@ def runDesktopApp(ips, serverErrorBox):
     FONT_BOLD = ("微软雅黑", 11, "bold")
 
     root = tk.Tk()
+    tRoot = time.time()
     root.title("手机输入 · 电脑端")
-    # 先隐藏窗口：几何（记忆的尺寸/位置）就绪前不显示，消除启动时
-    # 默认尺寸→记忆尺寸的跳变（闪一下），就绪后 deiconify 再出现
+
+    def dbg(tag):
+        # 临时调试（GEOM_DEBUG=1）：相对创建时刻的时间戳 + Win32 矩形/可见性，
+        # 用于定位启动跳变的几何重置点（收敛后删除）
+        if not os.environ.get("GEOM_DEBUG"):
+            return
+        try:
+            r = wintypes.RECT()
+            hwnd = int(root.frame(), 16)
+            user32.GetWindowRect(hwnd, ctypes.byref(r))
+            with open(os.path.join(BASE_DIR, "geom_debug.log"), "a", encoding="utf-8") as fh:
+                fh.write("[%.3fs] %s | rect=(%d,%d %dx%d) vis=%d tkgeo=%s\n" % (
+                    time.time() - tRoot, tag, r.left, r.top,
+                    r.right - r.left, r.bottom - r.top,
+                    user32.IsWindowVisible(hwnd), root.geometry()))
+        except Exception as exc:
+            with open(os.path.join(BASE_DIR, "geom_debug.log"), "a", encoding="utf-8") as fh:
+                fh.write("[?] %s | 采样失败 %r\n" % (tag, exc))
+
+    # 先隐藏窗口——必须在 iconbitmap 之前：实测 iconbitmap 会强制映射 wrapper，
+    # 使 200x200 默认窗口可见 0.44s（用户看到的启动小正方形即此）
     root.withdraw()
+    dbg("withdraw后")
+    # 窗口与任务栏图标：icon_domain.ico（打包后位于 _internal，源码模式在项目根）
+    try:
+        iconPath = os.path.join(sys._MEIPASS if getattr(sys, "frozen", False) else BASE_DIR,
+                                "icon_domain.ico")
+        root.iconbitmap(iconPath)
+    except Exception:
+        pass
+    dbg("iconbitmap后")
     root.minsize(430, 240)
     root.configure(bg=BG)
 
     # 窗口大小与位置持久化：关闭时存 exe 同级"窗口设置.json"（绿色便携），
-    # 启动时恢复，拉大拉小、拖动位置后下次打开保持原样
+    # 启动时恢复，拉大拉小、拖动位置后下次打开保持原样。
+    # 位置统一走 Win32 物理坐标（GetWindowRect/SetWindowPos）——
+    # Tk geometry() 设副屏负坐标时实际落点与报告值不符（偏 2103px），不可用
     winGeomFile = os.path.join(BASE_DIR, "窗口设置.json")
 
-    def loadWinGeom():
-        try:
-            with open(winGeomFile, "r", encoding="utf-8") as fh:
-                g = str(json.load(fh).get("geometry") or "")
-        except Exception:
-            return None
-        m = re.match(r"^(\d+)x(\d+)([+-]\d+)([+-]\d+)$", g.strip())
+    def winHwnd():
+        return int(root.frame(), 16)
+
+    def parseGeom(s):
+        # 解析旧版 Tk geometry 字符串，兼容 "+-2456" 双符号格式，返回 (w, h, x, y) 或 None
+        m = re.match(r"^(\d+)x(\d+)([+-]{1,2}\d+)([+-]{1,2}\d+)$", s.strip())
         if not m:
             return None
-        x, y = int(m.group(3)), int(m.group(4))
-        # 防窗口跑到屏幕外找不回：夹回可见区域
-        x = max(0, min(x, root.winfo_screenwidth() - 120))
-        y = max(0, min(y, root.winfo_screenheight() - 60))
-        return "%sx%s+%d+%d" % (m.group(1), m.group(2), x, y)
+        def toInt(t):
+            return int(t.replace("+-", "-").replace("--", "-").lstrip("+"))
+        try:
+            return int(m.group(1)), int(m.group(2)), toInt(m.group(3)), toInt(m.group(4))
+        except ValueError:
+            return None
+
+    def loadWinGeom():
+        # 返回 (w, h, x, y)，全部 Win32 GetWindowRect/SetWindowPos 物理外框语义。
+        # 实测：Tk geometry() 设副屏负坐标时报告值与实际落点不符（偏 2103px），
+        # 位置恢复必须走 SetWindowPos，保存必须走 GetWindowRect（与人工拖动同源）
+        try:
+            with open(winGeomFile, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except Exception:
+            return None
+        if isinstance(data.get("w"), int):
+            geom = (data["w"], data["h"], int(data.get("x") or 0), int(data.get("y") or 0))
+        else:
+            old = parseGeom(str(data.get("geometry") or ""))
+            geom = None if not old else (old[0], old[1], old[2], old[3])
+        if not geom:
+            return None
+        w, h, x, y = geom
+        # 防窗口跑到屏幕外找不回：按虚拟桌面（含副屏）夹取，副屏负坐标合法保留
+        try:
+            vx, vy = user32.GetSystemMetrics(76), user32.GetSystemMetrics(77)
+            vw, vh = user32.GetSystemMetrics(78), user32.GetSystemMetrics(79)
+            x = max(vx - 120, min(x, vx + vw - 120))
+            y = max(vy, min(y, vy + vh - 60))
+        except Exception:
+            x = max(0, min(x, root.winfo_screenwidth() - 120))
+            y = max(0, min(y, root.winfo_screenheight() - 60))
+        return w, h, x, y
 
     def saveWinGeom():
+        # GetWindowRect 取物理外框（与人工拖动/恢复同源同坐标系，往返精确）；
+        # 仅窗口正常显示状态时保存——最小化时几何不可靠，保留上次值。
+        # 用 Win32 可见性判断而非 root.state()：启动走 ShowWindow 直显，
+        # Tk 状态机保持 withdrawn，state() 查询不可信
         try:
+            hwnd = winHwnd()
+            if not user32.IsWindowVisible(hwnd) or user32.IsIconic(hwnd):
+                return
+            r = wintypes.RECT()
+            if not user32.GetWindowRect(hwnd, ctypes.byref(r)):
+                return
+            data = {"w": r.right - r.left, "h": r.bottom - r.top,
+                    "x": r.left, "y": r.top}
             with open(winGeomFile, "w", encoding="utf-8") as fh:
-                json.dump({"geometry": root.geometry()}, fh)
+                json.dump(data, fh)
         except Exception as exc:
             print("窗口设置保存失败：%r" % exc, flush=True)
 
@@ -3644,13 +3715,44 @@ def runDesktopApp(ips, serverErrorBox):
     root.after(2000, pollPhoneMsgs)
 
     root.update_idletasks()
+
+
+    dbg("UI构建完成")
     if savedGeom:
-        root.geometry(savedGeom)
+        w, h, x, y = savedGeom
+        # Tk 对未映射窗口的几何请求（geometry/pack 布局）一律延迟到映射后处理，
+        # UI 重（50 条聊天流+面板+触控板）时映射期窗口以 Tk 请求尺寸（默认
+        # 200x200 级联）可见 0.7s+——用户看到的小正方形跳变。修复分两层：
+        # ① root.configure(width/height) 把 Tk 请求尺寸改成保存值（映射初始
+        #    尺寸即最终，消除小正方形）；② 显示走 Win32 SetWindowPos（位置
+        #    精确定位，Tk 的 ±x 右锚定语义无法表达副屏绝对负坐标）+ ShowWindow
+        nearX = root.winfo_screenwidth() - x - w
+        geo = ("%dx%d-%d%+d" if (x < 0 and nearX > 0) else "%dx%d%+d%+d") % (w, h, nearX, y)
+        root.geometry(geo)
+        try:
+            root.configure(width=w, height=h)
+        except Exception:
+            pass
+        appendLog("服务已启动，等待手机连接（手机打开上方地址即可）")
+        root.update_idletasks()
+        dbg("geometry+update后")
+        try:
+            user32.SetWindowPos(winHwnd(), 0, x, y, w, h, 0x4)  # 0x4=SWP_NOZORDER
+            dbg("SetWindowPos后")
+            user32.ShowWindow(winHwnd(), 1)  # SW_SHOWNORMAL：出现即最终几何
+            dbg("ShowWindow后")
+        except Exception:
+            root.deiconify()
+            dbg("deiconify兜底")
     else:
         root.geometry("460x%d" % max(root.winfo_reqheight(), 240))
-    appendLog("服务已启动，等待手机连接（手机打开上方地址即可）")
-    # 几何全部就绪后才显示窗口，直接以最终大小+位置出现，无跳变
-    root.deiconify()
+        appendLog("服务已启动，等待手机连接（手机打开上方地址即可）")
+        root.update_idletasks()
+        try:
+            user32.ShowWindow(winHwnd(), 1)  # SW_SHOWNORMAL
+            dbg("ShowWindow后")
+        except Exception:
+            root.deiconify()
     root.mainloop()
 
 
